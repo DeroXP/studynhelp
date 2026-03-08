@@ -26,50 +26,95 @@ const STYLE = `
 .snhelp-chat__status { font-size: 11px; padding: 3px 8px; opacity: 0.6; width: 100%; }
 `;
 
-// ── Question detection ────────────────────────────────────────────────────────
+// ── Junk patterns to ignore ───────────────────────────────────────────────────
+const JUNK_RE = /(cookie|privacy policy|terms of (use|service)|accept|consent|advertisement|©|copyright|all rights reserved|sign in|log in|subscribe|newsletter|close this|skip to|navigation|search bar|loading|please wait|javascript|browser)/i;
 
+// ── Strong academic signals ───────────────────────────────────────────────────
+const ACADEMIC_RE = /(probability|solve|find|calculate|compute|determine|evaluate|simplify|derivative|integral|equation|hypothesis|null hypothesis|p-value|confidence interval|standard deviation|mean|median|variance|correlation|regression|matrix|vector|theorem|proof|given that|what is the|how many|how much|what are|which of the following|select all|true or false|random sample|contingency|distribution|sample size|test statistic|z-score|t-score|chi-square|anova|binomial|normal distribution|percent|proportion|ratio|factor|expand|graph|sketch|describe|explain why|compare|contrast)/i;
+
+// ── Question extraction ───────────────────────────────────────────────────────
 function extractPageQuestion() {
-  const questionRe = /(solve|find|calculate|compute|determine|evaluate|simplify|prove|show|what|which|how many|how much|if .+then|given that|\?)/i;
-  const selectors = [
-    '[class*="question"]', '[class*="problem"]', '[class*="prompt"]',
-    '[id*="question"]', '[id*="problem"]',
-    'h1', 'h2', 'h3',
-    'p', 'li', 'label', 'td', 'div'
-  ];
-
   const candidates = [];
 
-  for (const sel of selectors) {
+  function scoreEl(el) {
+    if (!el || el.closest('#snhelp-root')) return null;
+    const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
+    if (txt.length < 25 || txt.length > 2000) return null;
+    if (JUNK_RE.test(txt)) return null;
+
+    let score = 0;
+
+    // Strong signals
+    if (ACADEMIC_RE.test(txt)) score += 6;
+    if (/\?/.test(txt)) score += 4;
+    if (/\(a\)|\(b\)|\(c\)|\d+\./.test(txt)) score += 3; // numbered parts
+    if (/\d/.test(txt)) score += 2; // contains numbers
+    if (el.querySelector('math, .math, .katex, .MathJax, [class*="math"]')) score += 4;
+    if (/[=+\-*/^÷×∫∑√]/.test(txt)) score += 3;
+
+    // Element type bonuses
+    if (el.matches('[class*="question"],[class*="problem"],[class*="prompt"],[id*="question"],[id*="problem"]')) score += 8;
+    if (el.matches('[class*="hw"],[class*="assignment"],[class*="exercise"],[class*="quiz"]')) score += 6;
+    if (el.matches('h1,h2,h3,h4')) score += 1;
+
+    // Penalties
+    if (el.matches('nav, header, footer, aside')) score -= 10;
+    if (el.matches('button, a, input, select')) score -= 8;
+    if (txt.length < 60) score -= 2;
+    if (/^(home|menu|close|next|back|submit|cancel)/i.test(txt)) score -= 10;
+
+    // Deprioritize if deep nesting with little unique text
+    const childText = Array.from(el.children).map(c => (c.innerText || '').trim()).join(' ');
+    if (childText.length > txt.length * 0.9 && el.children.length > 3) score -= 3;
+
+    return score > 3 ? { txt, score, el } : null;
+  }
+
+  // Check specific high-value selectors first
+  const prioritySelectors = [
+    '[class*="question"]', '[class*="problem"]', '[class*="prompt"]',
+    '[id*="question"]', '[id*="problem"]',
+    '[class*="hw-"]', '[class*="exercise"]',
+    'h1', 'h2', 'h3', 'h4',
+    'p', 'li', 'td', 'label', 'div'
+  ];
+
+  const seen = new Set();
+  for (const sel of prioritySelectors) {
     try {
       document.querySelectorAll(sel).forEach(el => {
-        if (el.closest('#snhelp-root')) return;
-        const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
-        if (txt.length < 20 || txt.length > 1500) return;
-        if (!questionRe.test(txt)) return;
-        let score = 0;
-        if (/[?]/.test(txt)) score += 3;
-        if (/(solve|find|calculate|compute|determine|evaluate)/i.test(txt)) score += 3;
-        if (el.matches('[class*="question"],[class*="problem"],[id*="question"],[id*="problem"]')) score += 5;
-        if (el.matches('h1,h2,h3')) score += 2;
-        if (txt.length > 60) score += 1;
-        if (el.querySelector('math,.math,.katex,.MathJax')) score += 2;
-        candidates.push({ txt, score });
+        if (seen.has(el)) return;
+        seen.add(el);
+        const result = scoreEl(el);
+        if (result) candidates.push(result);
       });
     } catch (_) {}
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  return candidates[0]?.txt || null;
+
+  // Return top candidate text, but strip down to the most relevant portion
+  const best = candidates[0];
+  if (!best) return null;
+
+  // If very long, try to find the actual question sentence
+  let txt = best.txt;
+  if (txt.length > 400) {
+    // Look for the sentence with a question mark or strong academic keyword
+    const sentences = txt.split(/(?<=[.?!])\s+/);
+    const qSentences = sentences.filter(s => /\?/.test(s) || ACADEMIC_RE.test(s));
+    if (qSentences.length) txt = qSentences.slice(0, 3).join(' ');
+  }
+
+  return txt.slice(0, 600);
 }
 
 // ── Mount ─────────────────────────────────────────────────────────────────────
-
 export function mountChat(rootEl) {
   const styleEl = document.createElement('style');
   styleEl.textContent = STYLE;
   rootEl.appendChild(styleEl);
 
-  // Banner (shows detected question)
   const banner = createEl('div', { className: 'snhelp-chat__banner' });
   const bannerQ = createEl('span', { className: 'snhelp-chat__banner-q', text: 'Scanning for question…' });
   const bannerBtn = createEl('button', { className: 'snhelp-chat__banner-btn', text: 'Rescan' });
@@ -95,32 +140,20 @@ export function mountChat(rootEl) {
   wrap.append(messagesEl, inputWrap, toolbar);
   rootEl.append(banner, wrap);
 
-  // ── State ──────────────────────────────────────────────────────────────────
   let convo = [];
   let currentQuestion = null;
   let busy = false;
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
   function addMessage(role, text, steps) {
-    const msg = createEl('div', {
-      className: 'snhelp-chat__msg snhelp-chat__msg--' + role,
-      text
-    });
+    const msg = createEl('div', { className: 'snhelp-chat__msg snhelp-chat__msg--' + role, text });
     messagesEl.appendChild(msg);
-
     if (steps && steps.length) {
       const ol = document.createElement('ol');
-      steps.forEach(s => {
-        const li = document.createElement('li');
-        li.textContent = s;
-        ol.appendChild(li);
-      });
+      steps.forEach(s => { const li = document.createElement('li'); li.textContent = s; ol.appendChild(li); });
       const stepsEl = createEl('div', { className: 'snhelp-chat__steps' });
       stepsEl.appendChild(ol);
       messagesEl.appendChild(stepsEl);
     }
-
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return msg;
   }
@@ -133,13 +166,10 @@ export function mountChat(rootEl) {
     [btnHint, btnStep, btnExplain, btnReveal].forEach(b => b.disabled = val);
   }
 
-  // ── Core send ──────────────────────────────────────────────────────────────
-
   async function send(userText, systemOverride) {
     if (busy) return;
     setBusy(true);
 
-    const displayText = userText || systemOverride || '';
     if (userText) {
       addMessage('user', userText);
       convo.push({ role: 'user', text: userText });
@@ -149,9 +179,8 @@ export function mountChat(rootEl) {
     setStatus('Thinking…');
 
     try {
-      // Build message — prepend question context if we have it and it's early in convo
       let messageToSend = userText || systemOverride || '';
-      if (currentQuestion && convo.length <= 2 && !messageToSend.includes(currentQuestion.slice(0, 40))) {
+      if (currentQuestion && convo.length <= 2) {
         messageToSend = `The question on this page is:\n"${currentQuestion}"\n\n${messageToSend}`;
       }
 
@@ -164,7 +193,7 @@ export function mountChat(rootEl) {
         }
       });
 
-      const answer = data.response || 'Sorry, I couldn\'t get a response.';
+      const answer = data.response || 'Sorry, no response.';
       const steps = Array.isArray(data.steps) && data.steps.length ? data.steps : null;
 
       thinkingEl.textContent = answer;
@@ -190,8 +219,6 @@ export function mountChat(rootEl) {
     }
   }
 
-  // ── Auto-scan and greet ────────────────────────────────────────────────────
-
   function scanAndStart() {
     convo = [];
     messagesEl.innerHTML = '';
@@ -200,18 +227,15 @@ export function mountChat(rootEl) {
     if (currentQuestion) {
       bannerQ.textContent = currentQuestion.slice(0, 100) + (currentQuestion.length > 100 ? '…' : '');
       addMessage('system', '📌 Question detected — starting guided walkthrough…');
-      send(
-        null,
-        `The student is looking at this question:\n"${currentQuestion}"\n\nPlease greet them briefly, confirm you see the question, then give one helpful hint to get them started. Do NOT reveal the answer yet. Guide them step by step.`
+      send(null,
+        `The student is working on this question:\n"${currentQuestion}"\n\nPlease: 1) Briefly confirm you see the question, 2) Identify what concept/topic it covers, 3) Give ONE helpful starting hint without revealing the answer. Be specific to this exact question.`
       );
     } else {
       bannerQ.textContent = 'No question auto-detected';
-      addMessage('ai', '👋 Hi! I\'m your AI tutor. I couldn\'t auto-detect a question on this page — paste your question below and I\'ll guide you through it step by step!');
+      addMessage('ai', '👋 Hi! I\'m your AI tutor. I couldn\'t auto-detect a question — paste it below and I\'ll guide you through it step by step!');
       setStatus('Ready');
     }
   }
-
-  // ── Toolbar buttons ────────────────────────────────────────────────────────
 
   sendBtn.addEventListener('click', () => {
     const txt = textarea.value.trim();
@@ -224,13 +248,12 @@ export function mountChat(rootEl) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
   });
 
-  btnHint.addEventListener('click', () => send(null, 'Give me another hint for this problem. Still do not reveal the final answer.'));
+  btnHint.addEventListener('click', () => send(null, 'Give me another hint for this problem. Do not reveal the final answer yet.'));
   btnStep.addEventListener('click', () => send(null, 'Walk me through the next step in solving this problem.'));
   btnExplain.addEventListener('click', () => send(null, 'Explain the concept behind the last step in more detail.'));
-  btnReveal.addEventListener('click', () => send(null, 'I\'ve tried my best. Please reveal the full solution and final answer now, showing all steps clearly.'));
+  btnReveal.addEventListener('click', () => send(null, 'Please reveal the full solution and final answer now, showing all steps clearly.'));
   btnNew.addEventListener('click', () => scanAndStart());
   bannerBtn.addEventListener('click', () => scanAndStart());
 
-  // ── Start ──────────────────────────────────────────────────────────────────
-  setTimeout(scanAndStart, 300); // slight delay so page is fully rendered
+  setTimeout(scanAndStart, 500);
 }
