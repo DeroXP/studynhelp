@@ -390,7 +390,7 @@ class AIOrchestrator:
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0.2,
+                
                 response_format={"type": "json_object"},
                 max_completion_tokens=800,  # fixed: was max_tokens
             )
