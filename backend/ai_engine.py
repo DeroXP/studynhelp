@@ -402,12 +402,22 @@ class AIOrchestrator:
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                
-                response_format={"type": "json_object"},
-                max_completion_tokens=800,  # fixed: was max_tokens
+                max_completion_tokens=1200,
             )
-            content = resp.choices[0].message.content if resp and resp.choices else "{}"
-            return parse_model_json(content) or {}
+            content = resp.choices[0].message.content if resp and resp.choices else ""
+            if not content:
+                return {}
+            # Try JSON first
+            parsed = parse_model_json(content)
+            if parsed and parsed.get("response"):
+                return parsed
+            # If no JSON or no response field, treat the whole reply as the response text
+            return {
+                "response": content.strip(),
+                "steps": [],
+                "confidence": 0.8,
+                "needs_search": False,
+            }
         except Exception as exc:
             self.logger.error("OpenAI call failed: %s", exc)
             return {}
