@@ -1,3 +1,5 @@
+// Network helpers with retry/backoff and base URL detection
+
 const DEFAULT_BASE = 'https://studynhelp-production.up.railway.app';
 
 export function getApiBase() {
@@ -22,7 +24,6 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 export async function request(path, { method = 'GET', body = undefined, headers = {}, retries = 2, retryDelay = 350 } = {}) {
   const url = getApiBase() + path;
-  const finalHeaders = { 'Accept': 'application/json', ...headers };
   const token = ensureAuth();
   const finalHeaders = { 'Accept': 'application/json', 'X-SNHelp-Token': token, ...headers };
   let payload = undefined;
@@ -44,6 +45,13 @@ export async function request(path, { method = 'GET', body = undefined, headers 
         try { data = JSON.parse(txt); } catch { data = { text: txt }; }
       }
       if (!resp.ok) {
+        if (resp.status === 401) {
+          // Clear bad password and re-prompt next time
+          sessionStorage.removeItem('snhelp_token');
+          const err = new Error('Incorrect password. Please refresh and try again.');
+          err.status = 401;
+          throw err;
+        }
         const err = new Error((data && data.detail) || `HTTP ${resp.status}`);
         err.status = resp.status;
         err.data = data;
@@ -52,7 +60,7 @@ export async function request(path, { method = 'GET', body = undefined, headers 
       return data;
     } catch (e) {
       lastErr = e;
-      if (attempt >= retries) break;
+      if (attempt >= retries || e.status === 401) break;
       const backoff = retryDelay * Math.pow(2, attempt);
       await sleep(backoff);
       attempt++;
@@ -60,4 +68,3 @@ export async function request(path, { method = 'GET', body = undefined, headers 
   }
   throw lastErr || new Error('Network error');
 }
-
