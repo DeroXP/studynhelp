@@ -7,7 +7,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, Header, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, ConfigDict
@@ -24,6 +24,15 @@ MAX_EXPRESSION_LENGTH = 400
 MAX_BODY_SIZE = 1_048_576
 PAGE_URL_MAX_LENGTH = 2048
 METADATA_ID_MAX_LENGTH = 256
+
+# Password protection — set SNHELP_PASSWORD in Railway environment variables
+SNHELP_PASSWORD = os.getenv("SNHELP_PASSWORD", "")
+
+
+def verify_token(x_snhelp_token: Optional[str] = Header(None)) -> None:
+    """Dependency that checks the X-SNHelp-Token header against SNHELP_PASSWORD."""
+    if SNHELP_PASSWORD and x_snhelp_token != SNHELP_PASSWORD:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 
 class ConversationTurn(BaseModel):
@@ -148,7 +157,6 @@ class SlidingWindowRateLimiter(BaseHTTPMiddleware):
         ip = request.client.host if request.client else "unknown"
         now = time.time()
         dq = self.hits[ip]
-        # purge old entries
         while dq and (now - dq[0]) > self.window:
             dq.popleft()
         if len(dq) >= self.max_requests:
@@ -187,38 +195,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Body size + rate limiting
 app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_BODY_SIZE)
 rate_limit = int(os.getenv("RATE_LIMIT", "60"))
 rate_window = int(os.getenv("RATE_WINDOW", "60"))
 app.add_middleware(SlidingWindowRateLimiter, max_requests=rate_limit, window_seconds=rate_window)
 app.add_middleware(AccessLogMiddleware)
 
-# Orchestrator globals
 orchestrator: Optional[Any] = None
 orchestrator_ready: bool = False
 orchestrator_init_task: Optional[asyncio.Task] = None
 
 
 async def _init_orchestrator_background() -> None:
-    """
-    Initialize AIOrchestrator in a background thread/executor to avoid blocking the event loop.
-    Handles both sync and async constructors; sets orchestrator_ready when done.
-    """
     global orchestrator, orchestrator_ready
     try:
         loop = asyncio.get_running_loop()
 
-        # Run the constructor in the default executor so any blocking work won't block the event loop.
         def create_orchestrator():
             return AIOrchestrator()
 
         obj = await loop.run_in_executor(None, create_orchestrator)
-
-        # If the constructor returns an awaitable, await it (rare but possible).
         if inspect.isawaitable(obj):
             obj = await obj
-
         orchestrator = obj
         orchestrator_ready = True
         logger.info("AIOrchestrator initialized successfully")
@@ -230,24 +228,16 @@ async def _init_orchestrator_background() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    """
-    Start orchestrator initialization in background. Do not block startup.
-    """
     global orchestrator_init_task
     logger.info("Application startup: scheduling AIOrchestrator initialization")
-    # Start background initialization task if not already started
     if orchestrator_init_task is None:
         orchestrator_init_task = asyncio.create_task(_init_orchestrator_background())
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    """
-    Best-effort cleanup for orchestrator if it exposes a close/shutdown method.
-    """
     global orchestrator, orchestrator_ready, orchestrator_init_task
     logger.info("Application shutdown: cleaning up orchestrator")
-    # If init task still running, cancel it politely
     if orchestrator_init_task is not None and not orchestrator_init_task.done():
         orchestrator_init_task.cancel()
         try:
@@ -258,7 +248,6 @@ async def shutdown_event() -> None:
     if orchestrator is None:
         return
 
-    # Try several common shutdown function names (sync or async)
     for method_name in ("shutdown", "close", "stop", "terminate"):
         fn = getattr(orchestrator, method_name, None)
         if fn:
@@ -266,7 +255,6 @@ async def shutdown_event() -> None:
                 if inspect.iscoroutinefunction(fn):
                     await fn()
                 else:
-                    # run synchronous cleanup in executor
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, fn)
                 logger.info("Called orchestrator.%s() during shutdown", method_name)
@@ -281,8 +269,7 @@ async def shutdown_event() -> None:
 def sanitize_text(s: Optional[str]) -> Optional[str]:
     if s is None:
         return None
-    s2 = s.replace("\u0000", "").strip()
-    return s2
+    return s.replace("\u0000", "").strip()
 
 
 def enforce_max_length(s: str, max_len: int, field_name: str) -> str:
@@ -292,27 +279,20 @@ def enforce_max_length(s: str, max_len: int, field_name: str) -> str:
 
 
 async def _invoke_orchestrator(func_names: Sequence[str], kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Safely invoke a method on the orchestrator. If the orchestrator is not ready, raise 503.
-    Accept multiple possible method names for resilience.
-    """
     if not orchestrator_ready or orchestrator is None:
-        # Service not ready to handle AI requests yet
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="AI service not initialized. Try again shortly.")
 
-    # Try multiple possible method names for resilience
     for name in func_names:
         if hasattr(orchestrator, name):
             fn = getattr(orchestrator, name)
             try:
                 if inspect.iscoroutinefunction(fn):
                     return await fn(**kwargs)
-                # If fn is sync and potentially blocking, run in executor
                 loop = asyncio.get_running_loop()
                 return await loop.run_in_executor(None, lambda: fn(**kwargs))
             except HTTPException:
                 raise
-            except Exception as exc:  # pragma: no cover - safeguard
+            except Exception as exc:
                 logger.exception("orchestrator error in %s: %s", name, exc)
                 raise HTTPException(status_code=500, detail="Internal error.") from None
     raise HTTPException(status_code=500, detail="Service not available.")
@@ -321,16 +301,11 @@ async def _invoke_orchestrator(func_names: Sequence[str], kwargs: Dict[str, Any]
 # ---------------- Routes -----------------
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
-    # Keep this lightweight and always return 200 for platform healthchecks.
     return {"status": "ok"}
 
 
 @app.get("/ready")
 async def ready() -> Dict[str, Any]:
-    """
-    Readiness endpoint — returns whether the AI orchestrator finished initialization.
-    Useful for debugging / readiness probes (Railway uses /healthz by default).
-    """
     return {"ready": orchestrator_ready}
 
 
@@ -351,7 +326,7 @@ async def serve_assistant_js() -> Response:
 
 
 @app.post("/chat", response_model=ChatResponseModel)
-async def chat_endpoint(chat_request: ChatRequest) -> Dict[str, Any]:
+async def chat_endpoint(chat_request: ChatRequest, _: None = Depends(verify_token)) -> Dict[str, Any]:
     message = chat_request.message
     if not isinstance(message, str) or not message.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="message must be a non-empty string.")
@@ -368,14 +343,12 @@ async def chat_endpoint(chat_request: ChatRequest) -> Dict[str, Any]:
     metadata = {"page_url": page_url, "detected_question_id": detected_id}
 
     result = await _invoke_orchestrator(("chat", "tutor", "converse"), {"message": message, "conversation": conversation, "metadata": metadata})
-
-    # Validate and coerce response
     response = ChatResponseModel(**result)
     return response.dict(exclude_none=True)
 
 
 @app.post("/analyze", response_model=AnalyzeResponseModel)
-async def analyze_endpoint(analyze_request: AnalyzeRequest) -> Dict[str, Any]:
+async def analyze_endpoint(analyze_request: AnalyzeRequest, _: None = Depends(verify_token)) -> Dict[str, Any]:
     question = analyze_request.question
     if not isinstance(question, str) or not question.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="question must be a non-empty string.")
@@ -385,25 +358,19 @@ async def analyze_endpoint(analyze_request: AnalyzeRequest) -> Dict[str, Any]:
 
     context_payload = analyze_request.context or {}
     if not isinstance(context_payload, dict):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="context must be an object.",
-        )
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="context must be an object.")
 
     result = await _invoke_orchestrator(("analyze", "analyze_question", "process_analysis"), {"question": question, "context": context_payload})
-
     analyze_response = AnalyzeResponseModel(**result)
     return analyze_response.dict(exclude_none=True)
 
 
 @app.post("/math_help", response_model=MathHelpResponseModel)
-async def math_help_endpoint(math_request: MathHelpRequest) -> Dict[str, Any]:
+async def math_help_endpoint(math_request: MathHelpRequest, _: None = Depends(verify_token)) -> Dict[str, Any]:
     expression = math_request.expression
     if not isinstance(expression, str) or not expression.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="expression must be a non-empty string.",
-        )
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="expression must be a non-empty string.")
+
     expression = sanitize_text(expression) or ""
     expression = enforce_max_length(expression, MAX_EXPRESSION_LENGTH, "expression")
 
