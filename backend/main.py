@@ -1,3 +1,4 @@
+# backend/main.py
 import asyncio
 import inspect
 import logging
@@ -133,7 +134,6 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > self.max_body_size:
             return JSONResponse(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content={"detail": "Request body too large."})
-        # Otherwise, proceed; Starlette will stream body. We avoid buffering here for performance.
         return await call_next(request)
 
 
@@ -148,7 +148,7 @@ class SlidingWindowRateLimiter(BaseHTTPMiddleware):
         ip = request.client.host if request.client else "unknown"
         now = time.time()
         dq = self.hits[ip]
-        # purge
+        # purge old entries
         while dq and (now - dq[0]) > self.window:
             dq.popleft()
         if len(dq) >= self.max_requests:
