@@ -77,33 +77,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def parse_model_json(text: str) -> Dict[str, Any]:
-    """Try to locate and parse the first JSON object within freeform LLM text.
-
-    Handles code fences, single quotes, and trailing commas best-effort.
-    Returns an empty dict on failure.
-    """
+    """Try to locate and parse the first JSON object within freeform LLM text."""
     if not text:
         return {}
     s = text.strip()
-    # Remove code fences
     s = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", s)
-    # Try to find first {...}
     start = s.find("{")
     end = s.rfind("}")
     if start == -1 or end == -1 or end <= start:
         return {}
     candidate = s[start : end + 1]
-
-    # Normalize common JSON issues
     candidate = candidate.replace("'", '"')
-    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)  # trailing commas
+    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
 
     try:
         return json.loads(candidate)
     except Exception:
-        # Fallback: try to load with json5-like leniency removed; last resort regex keys
         try:
-            # Quote unquoted keys e.g., {foo: "bar"}
             candidate2 = re.sub(r"([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', candidate)
             return json.loads(candidate2)
         except Exception:
@@ -112,90 +102,59 @@ def parse_model_json(text: str) -> Dict[str, Any]:
 
 class _SafeEval(ast.NodeVisitor):
     allowed_nodes = (
-        ast.Expression,
-        ast.BinOp,
-        ast.UnaryOp,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.Pow,
-        ast.Mod,
-        ast.USub,
-        ast.UAdd,
-        ast.FloorDiv,
-        ast.Constant,
-        ast.Load,
-        ast.Call,  # allow selected math functions only
-        ast.Name,
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult,
+        ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd, ast.FloorDiv,
+        ast.Constant, ast.Load, ast.Call, ast.Name,
     )
 
     allowed_funcs = {
-        'sin': math.sin,
-        'cos': math.cos,
-        'tan': math.tan,
-        'log': math.log,
-        'log10': math.log10,
-        'sqrt': math.sqrt,
-        'exp': math.exp,
-        'pow': pow,
-        'abs': abs,
-        'floor': math.floor,
-        'ceil': math.ceil,
-        'round': round,
-        'pi': math.pi,
-        'e': math.e,
+        'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
+        'log': math.log, 'log10': math.log10, 'sqrt': math.sqrt,
+        'exp': math.exp, 'pow': pow, 'abs': abs,
+        'floor': math.floor, 'ceil': math.ceil, 'round': round,
+        'pi': math.pi, 'e': math.e,
     }
 
     def __init__(self) -> None:
         self._names: Dict[str, Any] = {k: v for k, v in self.allowed_funcs.items()}
 
-    def visit(self, node: ast.AST) -> Any:  # type: ignore[override]
+    def visit(self, node: ast.AST) -> Any:
         if not isinstance(node, self.allowed_nodes):
             raise ValueError(f"Disallowed expression: {type(node).__name__}")
         return super().visit(node)
 
-    def visit_Expression(self, node: ast.Expression) -> Any:  # noqa: N802
+    def visit_Expression(self, node: ast.Expression) -> Any:
         return self.visit(node.body)
 
-    def visit_BinOp(self, node: ast.BinOp) -> Any:  # noqa: N802
+    def visit_BinOp(self, node: ast.BinOp) -> Any:
         left = self.visit(node.left)
         right = self.visit(node.right)
-        if isinstance(node.op, ast.Add):
-            return left + right
-        if isinstance(node.op, ast.Sub):
-            return left - right
-        if isinstance(node.op, ast.Mult):
-            return left * right
-        if isinstance(node.op, ast.Div):
-            return left / right
-        if isinstance(node.op, ast.Pow):
-            return left ** right
-        if isinstance(node.op, ast.Mod):
-            return left % right
-        if isinstance(node.op, ast.FloorDiv):
-            return left // right
+        if isinstance(node.op, ast.Add): return left + right
+        if isinstance(node.op, ast.Sub): return left - right
+        if isinstance(node.op, ast.Mult): return left * right
+        if isinstance(node.op, ast.Div): return left / right
+        if isinstance(node.op, ast.Pow): return left ** right
+        if isinstance(node.op, ast.Mod): return left % right
+        if isinstance(node.op, ast.FloorDiv): return left // right
         raise ValueError("Unsupported binary operator")
 
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:  # noqa: N802
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
         operand = self.visit(node.operand)
-        if isinstance(node.op, ast.UAdd):
-            return +operand
-        if isinstance(node.op, ast.USub):
-            return -operand
+        if isinstance(node.op, ast.UAdd): return +operand
+        if isinstance(node.op, ast.USub): return -operand
         raise ValueError("Unsupported unary operator")
 
-    def visit_Constant(self, node: ast.Constant) -> Any:  # noqa: N802
+    def visit_Constant(self, node: ast.Constant) -> Any:
         if isinstance(node.value, (int, float)):
             return node.value
         raise ValueError("Constants other than numbers are not allowed")
 
-    def visit_Name(self, node: ast.Name) -> Any:  # noqa: N802
+    def visit_Name(self, node: ast.Name) -> Any:
         if node.id in self._names:
             return self._names[node.id]
         raise ValueError(f"Name '{node.id}' is not allowed")
 
-    def visit_Call(self, node: ast.Call) -> Any:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> Any:
         if not isinstance(node.func, ast.Name) or node.func.id not in self._names:
             raise ValueError("Only selected math functions are allowed")
         func = self._names[node.func.id]
@@ -206,54 +165,46 @@ class _SafeEval(ast.NodeVisitor):
 
 
 def safe_basic_eval(expr: str) -> Optional[float]:
-    """Safely evaluate basic arithmetic and math.* functions without names/assignments."""
     try:
         tree = ast.parse(expr, mode='eval')
         evaluator = _SafeEval()
         return float(evaluator.visit(tree))
-    except Exception:  # pylint: disable=broad-except
+    except Exception:
         return None
 
 
 class AIOrchestrator:
-    """AI orchestration for tutoring assistant using OpenAI + optional search.
-
-    Provides primary-first routing with optional search augmentation, light caching,
-    and robust fallbacks when API keys or packages are unavailable.
-    """
-
     def __init__(self) -> None:
-        self.primary_model = os.getenv("OPENAI_MODEL", "gpt-5-mini-2025-08-07")
-        self.search_model = os.getenv("SEARCH_MODEL", "gpt-4o-mini-search-preview-2025-03-11")
+        self.primary_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.search_model = os.getenv("SEARCH_MODEL", "gpt-4o-mini")
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.search_enabled = _env_bool("AI_SEARCH_ENABLED", False)
         ttl = int(os.getenv("AI_CACHE_TTL", "600"))
         maxsize = int(os.getenv("AI_CACHE_MAX", "256"))
 
         if TTLCache is not None:
-            self.cache = TTLCache(maxsize=maxsize, ttl=ttl)  # type: ignore[no-untyped-call]
+            self.cache = TTLCache(maxsize=maxsize, ttl=ttl)
         else:
             self.cache = LocalTTLCache(maxsize=maxsize, ttl=ttl)
 
-        self._openai_client = None  # lazy
-        self._sympy = None  # lazy import
+        self._openai_client = None
+        self._sympy = None
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    # ---------- Lazy imports ----------
     def _get_openai(self):
         if self._openai_client is not None:
             return self._openai_client
         if not self.api_key:
             return None
         try:
-            from openai import OpenAI  # type: ignore
-        except Exception as exc:  # pragma: no cover - import error
+            from openai import OpenAI
+        except Exception as exc:
             self.logger.warning("OpenAI SDK not available: %s", exc)
             return None
         try:
             self._openai_client = OpenAI(api_key=self.api_key)
             return self._openai_client
-        except Exception as exc:  # pragma: no cover - runtime init error
+        except Exception as exc:
             self.logger.error("Failed to init OpenAI client: %s", exc)
             return None
 
@@ -261,31 +212,22 @@ class AIOrchestrator:
         if self._sympy is not None:
             return self._sympy
         try:
-            import sympy  # type: ignore
+            import sympy
             self._sympy = sympy
-        except Exception:  # pragma: no cover - optional dep
+        except Exception:
             self._sympy = None
         return self._sympy
 
-    # ---------- Public API ----------
     def chat(self, message: str, conversation: List[Dict[str, str]], metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Chat with the tutor model. Returns structured tutoring response.
-
-        Parameters
-        - message: current user message
-        - conversation: list of prior messages with roles ("user"/"assistant")
-        - metadata: extra info such as page_url, detected_question_id
-        """
         cache_key = ("chat", message.strip(), tuple(sorted((k, str(metadata.get(k))) for k in (metadata or {}).keys())))
         cached = self.cache.get(cache_key)
         if cached:
             return deepcopy(cached)
 
         needs_search_hint = self._needs_search_heuristic(message)
-
         client = self._get_openai()
+
         if client is None:
-            # Mocked response
             resp = {
                 "response": self._mock_tutor_response(message),
                 "steps": self._mock_steps(message),
@@ -303,10 +245,7 @@ class AIOrchestrator:
             "confidence (0..1), needs_search (boolean). Keep it concise."
         )
 
-        msgs = [
-            {"role": "system", "content": system_prompt},
-        ]
-        # Include trimmed conversation context (limit length)
+        msgs = [{"role": "system", "content": system_prompt}]
         for m in conversation[-6:]:
             role = m.get("role", "user")
             text = m.get("text") or m.get("content") or ""
@@ -324,7 +263,6 @@ class AIOrchestrator:
             search_invoked = True
             summary, _ = self._maybe_search(message)
             search_summary = summary
-            # Refine with evidence
             refine_msgs = [
                 {"role": "system", "content": system_prompt + " Use the following evidence if relevant: " + (search_summary or "")},
                 {"role": "user", "content": message[-4000:]},
@@ -351,7 +289,6 @@ class AIOrchestrator:
         return deepcopy(out)
 
     def analyze(self, question: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze a question into structured tutoring guidance."""
         cache_key = ("analyze", question.strip())
         cached = self.cache.get(cache_key)
         if cached:
@@ -369,10 +306,7 @@ class AIOrchestrator:
                     "Select formulas or concepts that connect them",
                     "Work through calculations carefully",
                 ],
-                "hints": [
-                    "Underline key quantities",
-                    "Sketch a quick diagram if it helps",
-                ],
+                "hints": ["Underline key quantities", "Sketch a quick diagram if it helps"],
                 "confidence": 0.7,
             }
             self.cache[cache_key] = out
@@ -388,7 +322,6 @@ class AIOrchestrator:
             {"role": "user", "content": question[-6000:]},
         ]
         result = self._call_openai_json(client, self.primary_model, msgs)
-        # normalize
         out = {
             "problem_type": str(result.get("problem_type") or result.get("type") or "unknown"),
             "concepts": [str(c) for c in (result.get("concepts") or [])][:8],
@@ -401,7 +334,6 @@ class AIOrchestrator:
         return deepcopy(out)
 
     def math_help(self, expression: str, options: Dict[str, Any]) -> Dict[str, Any]:
-        """Evaluate math expressions, optionally using sympy for symbolic work."""
         self._get_sympy()
         expression = (expression or "").strip()
         if not expression:
@@ -410,6 +342,7 @@ class AIOrchestrator:
         show_steps = bool(options.get("show_steps"))
         numeric = bool(options.get("numeric"))
         precision = options.get("precision")
+
         if self._sympy is not None:
             try:
                 sympy_expr = self._sympy.sympify(expression)
@@ -427,33 +360,17 @@ class AIOrchestrator:
                         steps.append(f"Simplified form: {simplified}")
                     if numeric:
                         steps.append(f"Numeric evaluation: {result_value}")
-                return {
-                    "result": str(result_value),
-                    "steps": steps,
-                    "used_sympy": True,
-                    "error": None,
-                }
-            except Exception as exc:  # pylint: disable=broad-except
+                return {"result": str(result_value), "steps": steps, "used_sympy": True, "error": None}
+            except Exception as exc:
                 self.logger.debug("Sympy evaluation failed (%s); attempting fallback.", exc)
 
         value = safe_basic_eval(expression)
         if value is not None:
             steps = [f"Evaluated arithmetic expression: {expression}"] if show_steps else []
-            return {
-                "result": value,
-                "steps": steps,
-                "used_sympy": False,
-                "error": None,
-            }
+            return {"result": value, "steps": steps, "used_sympy": False, "error": None}
 
-        return {
-            "result": None,
-            "steps": [],
-            "used_sympy": bool(self._sympy),
-            "error": "Unable to evaluate expression safely.",
-        }
+        return {"result": None, "steps": [], "used_sympy": bool(self._sympy), "error": "Unable to evaluate expression safely."}
 
-    # ---------- Helpers ----------
     def _needs_search_heuristic(self, text: str) -> bool:
         t = (text or "").lower()
         year_match = re.findall(r"\b(202[4-9]|203\d)\b", t)
@@ -461,12 +378,10 @@ class AIOrchestrator:
         return bool(year_match or any(k in t for k in keywords))
 
     def _heuristic_steps_from_text(self, text: str) -> List[str]:
-        # Simple heuristic: split on numbers/bullets or sentences
         bullets = re.split(r"\n\s*(?:[-*•]|\d+[.)])\s+", text)
         parts = [p.strip() for p in bullets if p.strip()]
         if len(parts) >= 2:
             return parts[:8]
-        # fallback sentence split
         sents = re.split(r"(?<=[.!?])\s+", text)
         return [s.strip() for s in sents if s.strip()][:5]
 
@@ -477,12 +392,11 @@ class AIOrchestrator:
                 messages=messages,
                 temperature=0.2,
                 response_format={"type": "json_object"},
-                max_tokens=800,
+                max_completion_tokens=800,  # fixed: was max_tokens
             )
             content = resp.choices[0].message.content if resp and resp.choices else "{}"
-            data = parse_model_json(content) or {}
-            return data
-        except Exception as exc:  # pylint: disable=broad-except
+            return parse_model_json(content) or {}
+        except Exception as exc:
             self.logger.error("OpenAI call failed: %s", exc)
             return {}
 
@@ -491,46 +405,36 @@ class AIOrchestrator:
         if not info.get("invoked"):
             return None, []
         results = info.get("results") or []
-        # Summarize results into a short blurb
         if info.get("summary"):
             return str(info["summary"]), results
         titles = ", ".join([r.get("title", "") for r in results[:3]])
-        summary = f"Search found {len(results)} results: {titles}"
-        return summary, results
+        return f"Search found {len(results)} results: {titles}", results
 
     def run_search(self, query: str) -> Dict[str, Any]:
-        """Pluggable search provider. Optionally uses Tavily if available."""
         if not self.search_enabled:
             return {"invoked": False, "summary": None, "results": []}
 
-        # Try Tavily if configured
         tav_key = os.getenv("TAVILY_API_KEY")
         if tav_key:
             try:
-                from tavily import TavilyClient  # type: ignore
+                from tavily import TavilyClient
                 tc = TavilyClient(api_key=tav_key)
                 data = tc.search(query=query, max_results=3)
                 results = [
                     {"title": r.get("title"), "url": r.get("url"), "content": r.get("content")}
                     for r in data.get("results", [])[:3]
                 ]
-                # naive summary
                 pieces = [r.get("content", "") for r in results]
-                text = " ".join(pieces)
-                summary = " ".join(text.split()[:120])
+                summary = " ".join(" ".join(pieces).split()[:120])
                 return {"invoked": True, "summary": summary, "results": results}
-            except Exception as exc:  # pragma: no cover - optional path
+            except Exception as exc:
                 self.logger.warning("Tavily search failed: %s", exc)
 
-        # Deterministic mocked response
         results = [
             {"title": "Reference 1", "url": "https://example.com/ref1", "content": "General background and definitions."},
             {"title": "Reference 2", "url": "https://example.com/ref2", "content": "Worked examples and common pitfalls."},
         ]
-        summary = (
-            "Mocked search summary: reviewed 2 references with background info and examples relevant to the query. "
-            "Use them only to verify facts that require up-to-date information."
-        )
+        summary = "Mocked search summary: reviewed 2 references with background info and examples relevant to the query."
         return {"invoked": True, "summary": summary, "results": results}
 
     def _mock_tutor_response(self, message: str) -> str:
