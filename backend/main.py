@@ -194,8 +194,16 @@ rate_window = int(os.getenv("RATE_WINDOW", "60"))
 app.add_middleware(SlidingWindowRateLimiter, max_requests=rate_limit, window_seconds=rate_window)
 app.add_middleware(AccessLogMiddleware)
 
-orchestrator = AIOrchestrator()
+orchestrator = None
 
+@app.on_event("startup")
+async def startup_event():
+    global orchestrator
+    try:
+        orchestrator = AIOrchestrator()
+        logger.info("AIOrchestrator initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize AIOrchestrator: {e}")
 
 # ---------------- Utilities -----------------
 
