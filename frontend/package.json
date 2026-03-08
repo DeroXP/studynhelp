@@ -1,0 +1,14 @@
+{
+  "name": "studynhelp-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=iife --global-name=StudyNHelp --outfile=assistant.js --minify",
+    "dev": "esbuild src/index.js --bundle --format=iife --global-name=StudyNHelp --outfile=assistant.js --sourcemap --watch",
+    "test": "node -e \"console.log('frontend smoke test: ok')\""
+  },
+  "devDependencies": {
+    "esbuild": "0.19.12"
+  }
+}

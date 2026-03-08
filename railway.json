@@ -1,0 +1,16 @@
+{
+  "build": {
+    "builder": "Docker"
+  },
+  "deploy": {
+    "restartPolicyType": "ON_FAILURE",
+    "numReplicas": 1,
+    "healthcheckPath": "/healthz",
+    "startCommand": "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+  },
+  "env": {
+    "PORT": 8080,
+    "OPENAI_MODEL": "gpt-5-mini-2025-08-07",
+    "SEARCH_MODEL": "gpt-4o-mini-search-preview-2025-03-11"
+  }
+}
