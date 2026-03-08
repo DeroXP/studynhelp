@@ -1,6 +1,4 @@
-// Network helpers with retry/backoff and base URL detection
-
-const DEFAULT_BASE = 'http://localhost:8080';
+const DEFAULT_BASE = 'https://studynhelp-production.up.railway.app';
 
 export function getApiBase() {
   try {
@@ -10,11 +8,23 @@ export function getApiBase() {
   return DEFAULT_BASE;
 }
 
+export function ensureAuth() {
+  let token = sessionStorage.getItem('snhelp_token');
+  if (!token) {
+    token = prompt('🔒 StudyNHelp — Enter password:');
+    if (!token) throw new Error('No password entered');
+    sessionStorage.setItem('snhelp_token', token);
+  }
+  return token;
+}
+
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 export async function request(path, { method = 'GET', body = undefined, headers = {}, retries = 2, retryDelay = 350 } = {}) {
   const url = getApiBase() + path;
   const finalHeaders = { 'Accept': 'application/json', ...headers };
+  const token = ensureAuth();
+  const finalHeaders = { 'Accept': 'application/json', 'X-SNHelp-Token': token, ...headers };
   let payload = undefined;
   if (body !== undefined) {
     finalHeaders['Content-Type'] = 'application/json';
@@ -50,3 +60,4 @@ export async function request(path, { method = 'GET', body = undefined, headers 
   }
   throw lastErr || new Error('Network error');
 }
+
