@@ -194,16 +194,87 @@ rate_window = int(os.getenv("RATE_WINDOW", "60"))
 app.add_middleware(SlidingWindowRateLimiter, max_requests=rate_limit, window_seconds=rate_window)
 app.add_middleware(AccessLogMiddleware)
 
-orchestrator = None
+# Orchestrator globals
+orchestrator: Optional[Any] = None
+orchestrator_ready: bool = False
+orchestrator_init_task: Optional[asyncio.Task] = None
 
-@app.on_event("startup")
-async def startup_event():
-    global orchestrator
+
+async def _init_orchestrator_background() -> None:
+    """
+    Initialize AIOrchestrator in a background thread/executor to avoid blocking the event loop.
+    Handles both sync and async constructors; sets orchestrator_ready when done.
+    """
+    global orchestrator, orchestrator_ready
     try:
-        orchestrator = AIOrchestrator()
+        loop = asyncio.get_running_loop()
+
+        # Run the constructor in the default executor so any blocking work won't block the event loop.
+        def create_orchestrator():
+            return AIOrchestrator()
+
+        obj = await loop.run_in_executor(None, create_orchestrator)
+
+        # If the constructor returns an awaitable, await it (rare but possible).
+        if inspect.isawaitable(obj):
+            obj = await obj
+
+        orchestrator = obj
+        orchestrator_ready = True
         logger.info("AIOrchestrator initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize AIOrchestrator: {e}")
+        orchestrator = None
+        orchestrator_ready = False
+        logger.exception("Failed to initialize AIOrchestrator: %s", e)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """
+    Start orchestrator initialization in background. Do not block startup.
+    """
+    global orchestrator_init_task
+    logger.info("Application startup: scheduling AIOrchestrator initialization")
+    # Start background initialization task if not already started
+    if orchestrator_init_task is None:
+        orchestrator_init_task = asyncio.create_task(_init_orchestrator_background())
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    """
+    Best-effort cleanup for orchestrator if it exposes a close/shutdown method.
+    """
+    global orchestrator, orchestrator_ready, orchestrator_init_task
+    logger.info("Application shutdown: cleaning up orchestrator")
+    # If init task still running, cancel it politely
+    if orchestrator_init_task is not None and not orchestrator_init_task.done():
+        orchestrator_init_task.cancel()
+        try:
+            await orchestrator_init_task
+        except asyncio.CancelledError:
+            logger.info("orchestrator_init_task cancelled")
+
+    if orchestrator is None:
+        return
+
+    # Try several common shutdown function names (sync or async)
+    for method_name in ("shutdown", "close", "stop", "terminate"):
+        fn = getattr(orchestrator, method_name, None)
+        if fn:
+            try:
+                if inspect.iscoroutinefunction(fn):
+                    await fn()
+                else:
+                    # run synchronous cleanup in executor
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, fn)
+                logger.info("Called orchestrator.%s() during shutdown", method_name)
+            except Exception:
+                logger.exception("Error while calling orchestrator.%s()", method_name)
+    orchestrator_ready = False
+    orchestrator = None
+
 
 # ---------------- Utilities -----------------
 
@@ -221,6 +292,14 @@ def enforce_max_length(s: str, max_len: int, field_name: str) -> str:
 
 
 async def _invoke_orchestrator(func_names: Sequence[str], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Safely invoke a method on the orchestrator. If the orchestrator is not ready, raise 503.
+    Accept multiple possible method names for resilience.
+    """
+    if not orchestrator_ready or orchestrator is None:
+        # Service not ready to handle AI requests yet
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="AI service not initialized. Try again shortly.")
+
     # Try multiple possible method names for resilience
     for name in func_names:
         if hasattr(orchestrator, name):
@@ -228,11 +307,13 @@ async def _invoke_orchestrator(func_names: Sequence[str], kwargs: Dict[str, Any]
             try:
                 if inspect.iscoroutinefunction(fn):
                     return await fn(**kwargs)
-                return fn(**kwargs)
+                # If fn is sync and potentially blocking, run in executor
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: fn(**kwargs))
             except HTTPException:
                 raise
             except Exception as exc:  # pragma: no cover - safeguard
-                logger.error("orchestrator error in %s: %s", name, exc)
+                logger.exception("orchestrator error in %s: %s", name, exc)
                 raise HTTPException(status_code=500, detail="Internal error.") from None
     raise HTTPException(status_code=500, detail="Service not available.")
 
@@ -240,7 +321,17 @@ async def _invoke_orchestrator(func_names: Sequence[str], kwargs: Dict[str, Any]
 # ---------------- Routes -----------------
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
+    # Keep this lightweight and always return 200 for platform healthchecks.
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> Dict[str, Any]:
+    """
+    Readiness endpoint — returns whether the AI orchestrator finished initialization.
+    Useful for debugging / readiness probes (Railway uses /healthz by default).
+    """
+    return {"ready": orchestrator_ready}
 
 
 @app.get("/assistant.js")
